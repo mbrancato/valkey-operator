@@ -260,7 +260,7 @@ helm-package: helm-gen helm ## Package Helm chart
 	$Q$(HELM) package valkey-operator --app-version $(VERSION) --version $(VERSION)-chart
 
 helm-publish: helm-package ## Publish Helm chart
-	$Q$(HELM) push valkey-operator-$(VERSION)-chart.tgz oci://ghcr.io/hyperspike
+	$Q$(HELM) push valkey-operator-$(VERSION)-chart.tgz oci://$(REGISTRY)
 
 .PHONY: tunnel registry-proxy prometheus-proxy
 tunnel: ## turn on minikube's tunnel to test ingress and get UI access
