@@ -78,6 +78,7 @@ spec:
           - --leader-elect=false
           - --health-probe-bind-address=:8081
         image: controller:latest
+        imagePullPolicy: Always
         name: manager
         env:
         - name: APP_NAME
