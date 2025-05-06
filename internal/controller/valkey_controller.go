@@ -619,18 +619,32 @@ func (r *ValkeyReconciler) initCluster(ctx context.Context, valkey *hyperv1.Valk
 					}
 					flags := strings.Split(parts[2], ",")
 					if slices.Contains(flags, "myself") {
-						var slotsRange string
+						var slotsRange []string
 						if len(parts) < 9 {
-							slotsRange = ""
+							slotsRange = []string{""}
 						} else {
-							slotsRange = parts[8]
+							slotsRange = parts[8:]
 						}
-						if slotsRange != fmt.Sprintf("%d-%d", shard.slotMin, shard.slotMax) {
-							// delete any existing slot range
-							res := node.client.Do(ctx,
-								node.client.B().ClusterDelslotsrange().StartSlotEndSlot().StartSlotEndSlot(0,
-									16383).Build()).Error()
-							logger.Info("deleted slots range", "result", res)
+						for _, sr := range slotsRange {
+							if sr == "" {
+								continue
+							}
+							if sr != fmt.Sprintf("%d-%d", shard.slotMin, shard.slotMax) {
+								// delete any existing slot range
+								srMin, convErr := strconv.ParseInt(strings.Split(sr, "-")[0], 0, 64)
+								if convErr != nil {
+									logger.Error(convErr, "failed to convert slot range min")
+									return convErr
+								}
+								srMax, convErr := strconv.ParseInt(strings.Split(sr, "-")[1], 0, 64)
+								err = node.client.Do(ctx,
+									node.client.B().ClusterDelslotsrange().StartSlotEndSlot().StartSlotEndSlot(srMin, srMax).Build()).Error()
+								if err != nil {
+									logger.Error(err, "failed to delete slots range", "node", node.name, "range", fmt.Sprintf("%d-%d", srMin, srMax))
+									return err
+								}
+								logger.Info("deleted slots range", "range", fmt.Sprintf("%d-%d", srMin, srMax))
+							}
 						}
 					}
 				}
@@ -679,24 +693,27 @@ func (r *ValkeyReconciler) initCluster(ctx context.Context, valkey *hyperv1.Valk
 					}
 					flags := strings.Split(parts[2], ",")
 					if slices.Contains(flags, "myself") {
-						var slotsRange string
+						var slotsRange []string
 						if len(parts) < 9 {
-							slotsRange = ""
+							slotsRange = []string{""}
 						} else {
-							slotsRange = parts[8]
+							slotsRange = parts[8:]
 						}
-						if slotsRange != fmt.Sprintf("%d-%d", shard.slotMin, shard.slotMax) {
-							// set new slot range
-							err = node.client.Do(ctx,
-								node.client.B().ClusterAddslotsrange().StartSlotEndSlot().StartSlotEndSlot(int64(shard.slotMin),
-									int64(shard.slotMax)).Build()).Error()
-							if err != nil {
-								logger.Error(err, "failed to set slots range")
-								return err
+						for _, sr := range slotsRange {
+							if sr != fmt.Sprintf("%d-%d", shard.slotMin, shard.slotMax) {
+								// set new slot range
+								err = node.client.Do(ctx,
+									node.client.B().ClusterAddslotsrange().StartSlotEndSlot().StartSlotEndSlot(int64(shard.slotMin),
+										int64(shard.slotMax)).Build()).Error()
+								if err != nil {
+									logger.Error(err, "failed to set slots range", "shard", shard.id, "node", node.name, "range", fmt.Sprintf("%d-%d", shard.slotMin, shard.slotMax))
+									return err
+								}
+								logger.Info("set slots range", "shard", shard.id, "node", node.name, "range", fmt.Sprintf("%d-%d", shard.slotMin, shard.slotMax))
+								r.Recorder.Event(valkey, "Normal", "Setting",
+									fmt.Sprintf("Set slotrange on shard %d for %s/%s", shard.id, valkey.Namespace,
+										valkey.Name))
 							}
-							r.Recorder.Event(valkey, "Normal", "Setting",
-								fmt.Sprintf("Set slotrange on shard %d for %s/%s", shard.id, valkey.Namespace,
-									valkey.Name))
 						}
 					}
 				}
