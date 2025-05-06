@@ -2753,6 +2753,8 @@ func logClusterDetails(ctx context.Context, vClient valkeyClient.Client, valkey 
 		role := parts[2]
 		flags := parts[3]
 		slotRange := parts[8:]
+		connected := parts[7]
+		epoch := parts[6]
 
 		logger.Info("cluster node details",
 			"nodeID", nodeID,
@@ -2760,6 +2762,8 @@ func logClusterDetails(ctx context.Context, vClient valkeyClient.Client, valkey 
 			"role", role,
 			"flags", flags,
 			"slotRange", slotRange,
+			"epoch", epoch,
+			"connected", connected,
 			"cluster", valkey.Name,
 		)
 	}
