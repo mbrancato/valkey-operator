@@ -18,13 +18,17 @@ env:
 
 jobs:
   build-and-push-image:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
       matrix:
         platform:
-          - linux/amd64
-          - linux/arm64
+          - os: linux
+            arch: amd64
+            runner: ubuntu-24.04
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
     permissions:
       contents: read # for trivy scan upload
       packages: write
@@ -35,7 +39,7 @@ jobs:
     steps:
     - name: Prepare
       run: |
-        platform=${{ matrix.platform }}
+        platform=${{ matrix.platform.os }}/${{ matrix.platform.arch }}
         echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -78,9 +82,11 @@ jobs:
     - name: Build it
       id: go_build
       run: |
-        platform=${{ matrix.platform }}
+        platform=${{ matrix.platform.os }}/${{ matrix.platform.arch }}
+        export GOOS=${platform%/*}
+        export GOARCH=${platform#*/}
         echo "Building for $GOOS/$GOARCH"
-        make V=1 GOOS=${platform%/*} GOARCH=${platform#*/}
+        make V=1 GOOS=${GOOS} GOARCH=${GOARCH}
     - name: Build and push Docker image
       id: docker_build_controller
       uses: docker/build-push-action@v6
@@ -88,7 +94,7 @@ jobs:
         file: Dockerfile.controller
         context: .
         visibility: public
-        platforms: ${{ matrix.platform }}
+        platforms: ${{ matrix.platform.os }}/${{ matrix.platform.arch }}
         labels: ${{ steps.meta_manager.outputs.labels }}
         outputs: type=image,"name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
     - name: Build and push Sidecar image
@@ -98,7 +104,7 @@ jobs:
         file: Dockerfile.sidecar
         context: .
         visibility: public
-        platforms: ${{ matrix.platform }}
+        platforms: ${{ matrix.platform.os }}/${{ matrix.platform.arch }}
         labels: ${{ steps.meta_sidecar.outputs.labels }}
         outputs: type=image,"name=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar",push-by-digest=true,name-canonical=true,push=true
     - name: Build and push Valkey image
@@ -108,7 +114,7 @@ jobs:
         file: Dockerfile.valkey
         context: .
         visibility: public
-        platforms: ${{ matrix.platform }}
+        platforms: ${{ matrix.platform.os }}/${{ matrix.platform.arch }}
         labels: ${{ steps.meta_valkey.outputs.labels }}
         outputs: type=image,"name=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey",push-by-digest=true,name-canonical=true,push=true
 

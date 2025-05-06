@@ -21,6 +21,10 @@ SHA ?= $(shell git rev-parse --short HEAD)
 PKG ?= hyperspike.io/valkey-operator
 GOOS ?= linux
 GOARCH ?= amd64
+SED_INPLACE = sed -i
+ifeq ($(shell uname), Darwin)
+  SED_INPLACE = sed -i ''
+endif
 
 # CONTAINER_TOOL defines the container tool to be used for building images.
 # Be aware that the target commands are only tested with Docker which is
@@ -253,8 +257,8 @@ GOSEC_VERSION ?= v2.22.1
 helm-gen: manifests kustomize helmify ## Generate Helm chart from Kustomize manifests
 	$Qcd config/manager && $(KUSTOMIZE) edit set image controller=${IMG_CONTROLLER}
 	$Q$(KUSTOMIZE) build config/default | $(HELMIFY) -crd-dir valkey-operator
-	$Qsed s@\\\(app.kubernetes.io/name\\\)@\'\\\1\'@ -i valkey-operator/templates/deployment.yaml
-	$Qsed s@\\\(app.kubernetes.io/instance\\\)@\'\\\1\'@ -i valkey-operator/templates/deployment.yaml
+	$Q$(SED_INPLACE) "s@\\\(app.kubernetes.io/name\\\)@\'\\\1\'@" valkey-operator/templates/deployment.yaml
+	$Q$(SED_INPLACE) "s@\\\(app.kubernetes.io/instance\\\)@\'\\\1\'@" valkey-operator/templates/deployment.yaml
 
 helm-package: helm-gen helm ## Package Helm chart
 	$Q$(HELM) package valkey-operator --app-version $(VERSION) --version $(VERSION)-chart
@@ -315,7 +319,8 @@ define go-install-tool
 set -e; \
 package=$(2)@$(3) ;\
 echo "Downloading $${package}" ;\
-GOOS=linux GOARCH=amd64 GOBIN=$(LOCALBIN) go install $${package} ;\
+echo "Running: GOBIN=$(LOCALBIN) go install $${package} ";\
+GOOS="" GOARCH="" GOBIN=$(LOCALBIN) go install $${package} ;\
 mv "$$(echo "$(1)" | sed "s/-$(3)$$//")" $(1) ;\
 }
 endef
