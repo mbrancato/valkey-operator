@@ -535,6 +535,12 @@ func (r *ValkeyReconciler) initCluster(ctx context.Context, valkey *hyperv1.Valk
 		}
 	}
 
+	// log cluster details before init
+	if len(connectedNodes) > 0 {
+		vc := connectedNodes[0].client
+		_ = logClusterDetails(ctx, vc)
+	}
+
 	// forget any old nodes from the cluster that are not connected
 	for _, shard := range cluster.shards {
 		for _, node := range shard.nodes {
@@ -572,6 +578,7 @@ func (r *ValkeyReconciler) initCluster(ctx context.Context, valkey *hyperv1.Valk
 	}
 
 	// for each shard, check the nodes to ensure that they are configured correctly
+	// delete any existing slot range that does not match the configuration
 	for _, shard := range cluster.shards {
 		if len(shard.nodes) == 0 {
 			continue
@@ -620,9 +627,65 @@ func (r *ValkeyReconciler) initCluster(ctx context.Context, valkey *hyperv1.Valk
 						}
 						if slotsRange != fmt.Sprintf("%d-%d", shard.slotMin, shard.slotMax) {
 							// delete any existing slot range
-							_ = node.client.Do(ctx,
+							res := node.client.Do(ctx,
 								node.client.B().ClusterDelslotsrange().StartSlotEndSlot().StartSlotEndSlot(0,
 									16383).Build()).Error()
+							logger.Info("deleted slots range", "result", res)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// set the slot range to match the configuration
+	for _, shard := range cluster.shards {
+		if len(shard.nodes) == 0 {
+			continue
+		}
+		master := shard.nodes[0]
+		for _, node := range shard.nodes {
+			if node.isPrimary() {
+				master = node
+				break
+			}
+		}
+		for _, node := range shard.nodes {
+			if node == master {
+				if node.client == nil {
+					node.connected = false
+					continue
+				}
+				var info string
+				// check that the slots match that of the shard
+				info, err = node.client.Do(ctx, node.client.B().ClusterNodes().Build()).ToString()
+				if err != nil {
+					logger.Error(err, "failed to fetch cluster info", "node", node.name)
+					return err
+				}
+
+				for _, line := range strings.Split(info, "\n") {
+					_ = strings.TrimPrefix(line, "txt:")
+					_ = strings.TrimSuffix(line, "\r")
+					if line == "" {
+						continue
+					}
+					parts := strings.Split(line, " ")
+					if len(parts) < 4 {
+						logger.Error(fmt.Errorf("invalid cluster node info"),
+							"incorrect parts length from cluster info",
+							"line", line)
+						continue
+					}
+					flags := strings.Split(parts[2], ",")
+					if slices.Contains(flags, "myself") {
+						var slotsRange string
+						if len(parts) < 9 {
+							slotsRange = ""
+						} else {
+							slotsRange = parts[8]
+						}
+						if slotsRange != fmt.Sprintf("%d-%d", shard.slotMin, shard.slotMax) {
 							// set new slot range
 							err = node.client.Do(ctx,
 								node.client.B().ClusterAddslotsrange().StartSlotEndSlot().StartSlotEndSlot(int64(shard.slotMin),
