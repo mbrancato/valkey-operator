@@ -219,7 +219,7 @@ func (r *ValkeyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 3}, nil
 	}
 	if externalType != LoadBalancer {
-		if err := r.balanceNodes(ctx, valkey); err != nil {
+		if err = r.balanceNodes(ctx, valkey); err != nil {
 			return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 5}, nil
 		}
 	}
@@ -315,12 +315,12 @@ func (r *ValkeyReconciler) checkState(ctx context.Context, valkey *hyperv1.Valke
 		return err
 	}
 	defer vClient.Close()
-	if err := vClient.Do(ctx, vClient.B().Ping().Build()).Error(); err != nil {
+	if err = vClient.Do(ctx, vClient.B().Ping().Build()).Error(); err != nil {
 		logger.Error(err, "failed to ping valkey")
 		return err
 	}
 	valkey.Status.Ready = true
-	if err := r.Client.Status().Update(ctx, valkey); err != nil {
+	if err = r.Client.Status().Update(ctx, valkey); err != nil {
 		logger.Error(err, "Valkey status update failed.")
 		return err
 	}
@@ -519,21 +519,7 @@ func (r *ValkeyReconciler) initCluster(ctx context.Context, valkey *hyperv1.Valk
 	}
 
 	// ensure that all nodes in the cluster are connected to each other
-	for _, node := range connectedNodes {
-		if !node.connected {
-			continue
-		}
-		for _, peer := range connectedNodes {
-			if node == peer {
-				continue
-			}
-			if err = node.client.Do(ctx,
-				node.client.B().ClusterMeet().Ip(peer.ip).Port(int64(peer.port)).Build()).Error(); err != nil {
-				logger.Error(err, "failed to cluster meet")
-				return err
-			}
-		}
-	}
+	_ = introduceEveryone(ctx, connectedNodes)
 
 	// log cluster details before init
 	if len(connectedNodes) > 0 {
@@ -544,10 +530,11 @@ func (r *ValkeyReconciler) initCluster(ctx context.Context, valkey *hyperv1.Valk
 	// forget any old nodes from the cluster that are not connected
 	for _, shard := range cluster.shards {
 		for _, node := range shard.nodes {
+			var info string
 			if !node.connected {
 				continue
 			}
-			info, err := node.client.Do(ctx, node.client.B().ClusterNodes().Build()).ToString()
+			info, err = node.client.Do(ctx, node.client.B().ClusterNodes().Build()).ToString()
 			if err != nil {
 				logger.Error(err, "failed to fetch cluster nodes info", "node", node.name)
 				return err
@@ -595,8 +582,24 @@ func (r *ValkeyReconciler) initCluster(ctx context.Context, valkey *hyperv1.Valk
 		for _, node := range shard.nodes {
 			if node.isPrimary() {
 				master = node
+
 				break
 			}
+		}
+		if master.primary != "" {
+			// disable replication
+			err = master.client.Do(ctx, master.client.B().ClusterReset().Soft().Build()).Error()
+			if err != nil {
+				logger.Error(err, "failed to cluster reset", "node", master.name, "cluster", valkey.Name)
+				return err
+			}
+			err = introduceEveryone(ctx, connectedNodes)
+			if err != nil {
+				logger.Error(err, "failed to meet cluster members after reset", "node", master.name, "cluster", valkey.Name)
+				return err
+			}
+
+			return fmt.Errorf("reset cluster node %s", master.name)
 		}
 		for _, node := range shard.nodes {
 			if node == master {
@@ -608,7 +611,7 @@ func (r *ValkeyReconciler) initCluster(ctx context.Context, valkey *hyperv1.Valk
 				// check that the slots match that of the shard
 				info, err = node.client.Do(ctx, node.client.B().ClusterNodes().Build()).ToString()
 				if err != nil {
-					logger.Error(err, "failed to fetch cluster info", "node", node.name,"cluster", valkey.Name)
+					logger.Error(err, "failed to fetch cluster info", "node", node.name, "cluster", valkey.Name)
 					return err
 				}
 
@@ -645,6 +648,10 @@ func (r *ValkeyReconciler) initCluster(ctx context.Context, valkey *hyperv1.Valk
 									return convErr
 								}
 								srMax, convErr := strconv.ParseInt(strings.Split(sr, "-")[1], 0, 64)
+								if convErr != nil {
+									logger.Error(convErr, "failed to convert slot range max")
+									return convErr
+								}
 								err = node.client.Do(ctx,
 									node.client.B().ClusterDelslotsrange().StartSlotEndSlot().StartSlotEndSlot(srMin, srMax).Build()).Error()
 								if err != nil {
@@ -714,7 +721,18 @@ func (r *ValkeyReconciler) initCluster(ctx context.Context, valkey *hyperv1.Valk
 									node.client.B().ClusterAddslotsrange().StartSlotEndSlot().StartSlotEndSlot(int64(shard.slotMin),
 										int64(shard.slotMax)).Build()).Error()
 								if err != nil {
-									logger.Error(err, "failed to set slots range", "shard", shard.id, "node", node.name, "range", fmt.Sprintf("%d-%d", shard.slotMin, shard.slotMax), "cluster", valkey.Name)
+									logger.Error(err, "failed to set slots range", "shard", shard.id, "node", node.name, "range", fmt.Sprintf("%d-%d", shard.slotMin, shard.slotMax), "cluster",
+										valkey.Name)
+									// reset this node - there is a state where connected nodes do not pick up shard assignments for
+									// other shard masters, even when the shard master knows its correct shard assignment. This is
+									// an aggressive fix, but the controller does not currently support resizing the cluster shards.
+									_ = node.client.Do(ctx, node.client.B().Flushall().Sync().Build()).Error()
+									_ = node.client.Do(ctx, node.client.B().ClusterReset().Soft().Build()).Error()
+									err = introduceEveryone(ctx, connectedNodes)
+									if err != nil {
+										logger.Error(err, "failed to meet cluster members after reset", "node", node.name, "cluster", valkey.Name)
+										return err
+									}
 									return err
 								}
 								logger.Info("set slots range", "shard", shard.id, "node", node.name, "range", fmt.Sprintf("%d-%d", shard.slotMin, shard.slotMax), "cluster", valkey.Name)
@@ -726,6 +744,20 @@ func (r *ValkeyReconciler) initCluster(ctx context.Context, valkey *hyperv1.Valk
 					}
 				}
 			} else if node.primary != master.id {
+				if node.primary != "" {
+					// reset this node
+					err = node.client.Do(ctx, node.client.B().ClusterReset().Soft().Build()).Error()
+					if err != nil {
+						logger.Error(err, "failed to cluster reset", "node", node.name, "cluster", valkey.Name)
+						return err
+					}
+
+				}
+				err = introduceEveryone(ctx, connectedNodes)
+				if err != nil {
+					logger.Error(err, "failed to meet cluster members before replica assignment", "node", node.name, "cluster", valkey.Name)
+					return err
+				}
 				err = node.client.Do(ctx, node.client.B().ClusterReplicate().NodeId(master.id).Build()).Error()
 				if err != nil {
 					logger.Error(err, "failed to cluster replicate", "node", node.name, "cluster", valkey.Name)
@@ -1761,7 +1793,7 @@ func (r *ValkeyReconciler) balanceNodes(ctx context.Context, valkey *hyperv1.Val
 		return err
 	}
 	defer vClient.Close()
-	if err := vClient.Do(ctx, vClient.B().Ping().Build()).Error(); err != nil {
+	if err = vClient.Do(ctx, vClient.B().Ping().Build()).Error(); err != nil {
 		logger.Error(err, "failed to ping valkey")
 		return err
 	}
@@ -1804,7 +1836,7 @@ func (r *ValkeyReconciler) balanceNodes(ctx context.Context, valkey *hyperv1.Val
 			time.Sleep(time.Second * 2)
 			tries++
 			if tries > 15 {
-				err := fmt.Errorf("timeout waiting for pods")
+				err = fmt.Errorf("timeout waiting for pods")
 				logger.Error(err, "failed to get pod ips", "cluster", valkey.Name)
 				return err
 			}
@@ -1830,7 +1862,7 @@ func (r *ValkeyReconciler) balanceNodes(ctx context.Context, valkey *hyperv1.Val
 			if myid == id {
 				continue
 			}
-			if err := vClient.Do(ctx, vClient.B().ClusterForget().NodeId(id).Build()).Error(); err != nil {
+			if err = vClient.Do(ctx, vClient.B().ClusterForget().NodeId(id).Build()).Error(); err != nil {
 				logger.Error(err, "failed to forget node", "ipId", ipId, "id", id, "cluster", valkey.Name)
 				return err
 			}
@@ -2766,6 +2798,26 @@ func logClusterDetails(ctx context.Context, vClient valkeyClient.Client, valkey 
 			"connected", connected,
 			"cluster", valkey.Name,
 		)
+	}
+	return nil
+}
+
+func introduceEveryone(ctx context.Context, connectedNodes []*valkeyNode) error {
+	var err error
+	for _, node := range connectedNodes {
+		if !node.connected {
+			continue
+		}
+
+		for _, peer := range connectedNodes {
+			if node == peer {
+				continue
+			}
+			if err = node.client.Do(ctx,
+				node.client.B().ClusterMeet().Ip(peer.ip).Port(int64(peer.port)).Build()).Error(); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
